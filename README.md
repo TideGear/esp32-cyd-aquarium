@@ -123,15 +123,18 @@ See [docs/WIFI_TIME.md](docs/WIFI_TIME.md).
 - [Development notes](docs/DEVELOPMENT_NOTES.md)
 - [Attribution](docs/ATTRIBUTION.md)
 
-## Support
+## Support ☕
 
-I made this for myself first. I wanted one of these little aquariums on my own
-desk, it turned out well, so I figured I'd share it in case someone else enjoys
-having one too.
+I built this for fun and put it out there for free. If you've enjoyed it and
+would like to see it grow, buying me a coffee helps me keep tinkering and adding
+new things to it. A star, an issue about your board variant, or a short hardware
+report are always welcome too.
 
-If you liked it or found it useful, you can support me by buying me a coffee
-[here](https://ko-fi.com/lagerpun). A star, an issue about your board variant,
-or a short hardware report are also always welcome.
+<p align="center">
+  <a href="https://ko-fi.com/lagerpun">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Buy Me a Coffee at ko-fi.com">
+  </a>
+</p>
 
 ## Attribution
 
