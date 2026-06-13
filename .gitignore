@@ -1,0 +1,46 @@
+# PlatformIO / embedded build output
+.pio/
+.pioenvs/
+.piolibdeps/
+.platformio-core/
+.venv-platformio/
+.clang_complete
+.gcc-flags.json
+*.bin
+*.elf
+*.map
+*.d
+*.o
+*.obj
+*.a
+*.lib
+
+# Local secrets
+*Secrets.h
+.env
+.env.*
+!.env.example
+
+# Logs and temporary diagnostics
+*.log
+*.err.log
+logs/
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Svelte / web UI dependencies and output
+node_modules/
+dist/
+build/
+.svelte-kit/
+package/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Local tools
+mklittlefs
+mklittlefs.exe
