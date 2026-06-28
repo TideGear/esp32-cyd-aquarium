@@ -15,6 +15,10 @@ import { Boid } from "./aquarium/boid.js";
 import { BOIDS } from "./aquarium/constants.js";
 import { SeededRandom } from "./aquarium/random.js";
 
+/* One fresh random seed per app launch so the tank differs every time.
+   (The upstream JS port hardcodes its seeds, which made every launch identical.) */
+const LAUNCH_SEED = (Date.now() >>> 0) || 1;
+
 /* ---- exact 3x5 glyph atlas, copied verbatim from aquarium/pixel-text.js ---- */
 const GLYPHS = {
   "0":["111","101","101","101","111"],"1":["010","110","010","010","111"],
@@ -58,7 +62,7 @@ function defaults() {
   return {
     unit:"F", zip:"", country:"US", useLive:true,
     manualTempC:21, waterMinC:10, waterMaxC:35,
-    humidityPercent:50, co2ppm:420, useLiveHumidity:true,
+    humidityPercent:50, co2ppm:420, useLiveHumidity:true, useLiveAqi:true,
     showOutside:true, clockScale:1.0,
     fishCount:11, plantCount:5, boidsPerGroup:15, ledSize:"normal",
   };
@@ -84,6 +88,7 @@ const tempToC = (v) => (settings.unit === "F" ? fToC(v) : v);
 /* ------------------------------- weather feed ----------------------------- */
 let liveTempC = null;
 let liveHumidity = null;
+let liveAqi = null;
 let placeName = "";
 let lastWeather = 0;
 function setWx(msg, cls) {
@@ -93,7 +98,7 @@ function setWx(msg, cls) {
 async function fetchOutsideTemp() {
   const zip = (settings.zip || "").trim();
   const cc = ((settings.country || "US").trim() || "US").toLowerCase();
-  if (!zip) { liveTempC = null; liveHumidity = null; setWx("Enter a zip code to use outside temperature.", ""); return; }
+  if (!zip) { liveTempC = null; liveHumidity = null; liveAqi = null; setWx("Enter a zip code to use outside temperature.", ""); return; }
   setWx("Looking up " + zip + "…", "");
   try {
     const g = await fetch("https://api.zippopotam.us/" + cc + "/" + encodeURIComponent(zip));
@@ -112,10 +117,20 @@ async function fetchOutsideTemp() {
     liveTempC = t; lastWeather = Date.now();
     const rh = wj.current.relative_humidity_2m;
     liveHumidity = typeof rh === "number" ? rh : null;
+    // Air quality drives the CO2 stress mechanic (remapped). Keep it non-fatal:
+    // a failed AQI lookup must not blank out the temperature/humidity we just got.
+    try {
+      const a = await fetch("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" + lat +
+        "&longitude=" + lon + "&current=us_aqi");
+      const aj = a.ok ? await a.json() : null;
+      const aqi = aj && aj.current && aj.current.us_aqi;
+      liveAqi = typeof aqi === "number" ? aqi : null;
+    } catch (e2) { liveAqi = null; }
     const rhTxt = liveHumidity != null ? " · " + Math.round(liveHumidity) + "% RH" : "";
-    setWx(placeName + ": " + dispTemp(t) + "°" + settings.unit + rhTxt, "ok");
+    const aqiTxt = liveAqi != null ? " · AQI " + Math.round(liveAqi) : "";
+    setWx(placeName + ": " + dispTemp(t) + "°" + settings.unit + rhTxt + aqiTxt, "ok");
   } catch (e) {
-    liveTempC = null; liveHumidity = null;
+    liveTempC = null; liveHumidity = null; liveAqi = null;
     setWx("Could not get weather — check the connection or zip code.", "err");
   }
 }
@@ -129,7 +144,27 @@ function effectiveWaterTempC() {
 function effectiveHumidity() {
   return (settings.useLiveHumidity && liveHumidity != null) ? liveHumidity : settings.humidityPercent;
 }
-function effectiveCO2() { return settings.co2ppm; }
+/* Map US AQI onto the aquarium's CO2 stress scale, keyed to the AQI category
+   breakpoints so bad-air days actually stress the tank:
+     AQI   0 (clean)      -> 420 ppm  (ambient; fish thrive, CO2 < OK=600)
+     AQI  50 (Good/Mod)    -> 600 ppm  (top of the healthy band)
+     AQI 150 (Unhealthy)   -> 1000 ppm (CO2_BAD: slow + losing health)
+     AQI 300 (Hazardous)   -> 2000 ppm (CO2_REALBAD: frozen, dying)
+   AQI above 300 clamps to 2000. */
+function aqiToCo2(aqi) {
+  const pts = [[0, 420], [50, 600], [150, 1000], [300, 2000]];
+  if (aqi <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) {
+    if (aqi <= pts[i][0]) {
+      const x0 = pts[i - 1][0], y0 = pts[i - 1][1], x1 = pts[i][0], y1 = pts[i][1];
+      return y0 + (y1 - y0) * (aqi - x0) / (x1 - x0);
+    }
+  }
+  return pts[pts.length - 1][1];
+}
+function effectiveCO2() {
+  return (settings.useLiveAqi && liveAqi != null) ? aqiToCo2(liveAqi) : settings.co2ppm;
+}
 
 /* ------------------------------ scene / engine ---------------------------- */
 let LW, LH, background, foreground, composite, framebuffer, engine, fishTarget;
@@ -149,18 +184,28 @@ function buildScene() {
   framebuffer = { width:LW, height:LH, modeId:"cyd-landscape", background, foreground };
   const mode = { id:"cyd-landscape", logicalWidth:LW, logicalHeight:LH, physicalWidth:RENDER_W, physicalHeight:RENDER_H };
   engine = createAquariumEngine({ mode, disableStateLoad:true });
+  // Per-launch food drop positions (else identical each launch, like the port's default).
+  try { engine.food.rng = new SeededRandom((LAUNCH_SEED ^ 0x0f00d123) >>> 0); } catch (e) {}
   applyCounts();
   recomputeViewport();
 }
 function applyCounts() {
+  // Re-seed every generator from this launch's seed so species/colors/positions,
+  // plants and boids are randomized per launch instead of frozen to the port's
+  // fixed default seeds (matching the original C++, which seeds from the clock).
+  try { engine.fish.rng = new SeededRandom(LAUNCH_SEED); } catch (e) {}
   try { engine.fish.initializeFish(settings.fishCount); } catch (e) {}
   fishTarget = settings.fishCount;
-  try { engine.plants.count = settings.plantCount; engine.plants.width = 0; engine.plants.resize(LW, LH); } catch (e) {}
+  // Plants re-seed from rngSeed inside resize(), so set the seed (not the rng).
+  try {
+    engine.plants.rngSeed = (LAUNCH_SEED ^ 0x00a71a17) >>> 0;
+    engine.plants.count = settings.plantCount; engine.plants.width = 0; engine.plants.resize(LW, LH);
+  } catch (e) {}
   applyBoids(settings.boidsPerGroup);
 }
 function applyBoids(n) {
   const bm = engine.boidManager;
-  const rng = new SeededRandom(0xb01d123);
+  const rng = new SeededRandom((LAUNCH_SEED ^ 0xb01d123) >>> 0);
   bm.boidGroups = [];
   for (let g = 0; g < BOIDS.GROUPS; g++) {
     const arr = [];
@@ -328,6 +373,7 @@ function populatePanel() {
   $("inpCountry").value = settings.country;
   $("chkLive").checked = settings.useLive;
   $("chkLiveHum").checked = settings.useLiveHumidity;
+  $("chkLiveAqi").checked = settings.useLiveAqi;
   $("inpCold").value = dispTemp(settings.waterMinC);
   $("inpHot").value = dispTemp(settings.waterMaxC);
   $("inpManual").value = dispTemp(settings.manualTempC);
@@ -349,6 +395,7 @@ function bindPanel() {
   $("inpCountry").addEventListener("change", (e) => { settings.country = (e.target.value.trim() || "US"); saveSettings(); fetchOutsideTemp(); });
   $("chkLive").addEventListener("change", (e) => { settings.useLive = e.target.checked; saveSettings(); });
   $("chkLiveHum").addEventListener("change", (e) => { settings.useLiveHumidity = e.target.checked; saveSettings(); });
+  $("chkLiveAqi").addEventListener("change", (e) => { settings.useLiveAqi = e.target.checked; saveSettings(); });
   $("btnRefresh").addEventListener("click", fetchOutsideTemp);
 
   $("inpCold").addEventListener("change", (e) => { settings.waterMinC = tempToC(parseFloat(e.target.value)); saveSettings(); });

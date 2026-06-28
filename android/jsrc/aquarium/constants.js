@@ -241,7 +241,10 @@ export const MOTION_PROFILES = freeze({
     MAX_SPEED: 35,
     MIN_SPEED: 5,
     MAX_FORCE: 0.25,
-    SIN_AMPLITUDE: 8,
+    // Deviation from upstream (was 8): the forward-sine push must stay below
+    // MIN_SPEED, otherwise the backward half-cycle reverses velocity and the
+    // heading (vel.heading()) snaps 180deg every frame. 3 keeps a gentle pulse.
+    SIN_AMPLITUDE: 3,
     SIN_FREQUENCY: 0.002,
     NOISE_AMPLITUDE: 0.1,
     NOISE_FREQUENCY: 0.01,

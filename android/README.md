@@ -23,10 +23,11 @@ The upstream water palette sweeps 10C-35C (50F-95F), neutral teal-green around
 are adjustable and the live outside temperature is mapped onto that window.
 
 ### Network / privacy
-Only when a zip is set, two public key-less endpoints are used: api.zippopotam.us
-(zip -> lat/long) and api.open-meteo.com (current temperature). Nothing else is
-sent; no analytics. Needs the INTERNET permission; with no zip it never uses the
-network.
+Only when a zip is set, three public key-less endpoints are used: api.zippopotam.us
+(zip -> lat/long), api.open-meteo.com (current temperature + humidity), and
+air-quality-api.open-meteo.com (current US AQI, remapped onto the CO2 stress
+effect). Nothing else is sent; no analytics. Needs the INTERNET permission; with
+no zip it never uses the network.
 
 ## The aquarium is the real thing
 Not a re-creation: it runs the actual simulation modules from esp32-cyd-aquarium

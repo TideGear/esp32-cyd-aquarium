@@ -41,6 +41,11 @@ package/
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
+# Android (WebView) app build intermediates (the APK is the tracked deliverable;
+# bundle.js is regenerated from jsrc/ by android/build-apk.ps1)
+android/_build/
+android/assets/bundle.js
+
 # Local tools
 mklittlefs
 mklittlefs.exe

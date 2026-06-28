@@ -113,6 +113,11 @@
             <div class="hint">When on, real humidity makes the plants wither (dry) or overgrow (humid).</div></div>
           <label class="switch"><input type="checkbox" id="chkLiveHum"><span class="slider"></span></label>
         </div>
+        <div class="row">
+          <div><label for="chkLiveAqi">Use local air quality as CO&#8322;</label>
+            <div class="hint">When on, the local US AQI drives the CO&#8322; stress effect: clean air keeps fish healthy, unhealthy air slows them, hazardous air freezes them.</div></div>
+          <label class="switch"><input type="checkbox" id="chkLiveAqi"><span class="slider"></span></label>
+        </div>
         <div class="wxstatus" id="wxStatus"></div>
         <div class="row" style="justify-content:flex-end">
           <button class="small" id="btnRefresh">Refresh now</button>
@@ -147,7 +152,7 @@
         </div>
         <div class="row">
           <div><label for="inpCo2">CO&#8322;</label>
-            <div class="hint">~420 outdoors, 600 fine. 1000+ makes fish &amp; dots slow and lose health; 2000 freezes and kills them. Can't be read from weather.</div></div>
+            <div class="hint">~420 outdoors, 600 fine. 1000+ makes fish &amp; dots slow and lose health; 2000 freezes and kills them. Used when "use local air quality" is off or unavailable.</div></div>
           <div><input type="range" id="inpCo2" min="400" max="2500" step="20"><span class="val" id="co2Val"></span></div>
         </div>
       </div>
