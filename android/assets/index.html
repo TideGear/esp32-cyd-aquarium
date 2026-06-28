@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Aquarium Clock</title>
+<style>
+  :root {
+    --aqua: #6fe6cf;
+    --aqua-dim: #2f7d72;
+    --ink: #06141c;
+    --panel: #0a1a22;
+    --line: #14333b;
+    --text: #cfeee8;
+    --muted: #7fb4ac;
+  }
+  html, body { margin:0; padding:0; width:100%; height:100%; background:#000; overflow:hidden;
+    font-family: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif; }
+  #screen { position:fixed; inset:0; width:100vw; height:100vh; display:block; background:#000; }
+
+  /* settings overlay */
+  #settings { position:fixed; inset:0; display:none; z-index:10;
+    background: rgba(2,8,12,0.72); backdrop-filter: blur(3px);
+    align-items:center; justify-content:center; }
+  #settings.open { display:flex; }
+  .card { width:min(680px, 94vw); max-height:90vh; overflow-y:auto;
+    background: linear-gradient(180deg, #0c1f28, #081319);
+    border:1px solid var(--line); border-radius:18px; color:var(--text);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.04);
+    padding: 22px 22px 16px; }
+  .card h1 { margin:0 0 2px; font-size:20px; letter-spacing:0.14em; text-transform:uppercase;
+    color:var(--aqua); font-weight:700; }
+  .card .sub { margin:0 0 16px; font-size:12.5px; color:var(--muted); letter-spacing:0.02em; }
+  .sec { border-top:1px solid var(--line); padding:14px 0 4px; }
+  .sec h2 { margin:0 0 10px; font-size:12px; letter-spacing:0.18em; text-transform:uppercase; color:var(--aqua-dim); font-weight:700; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:0 0 12px; }
+  .row label { font-size:14px; color:var(--text); flex:0 0 auto; }
+  .row .hint { font-size:11.5px; color:var(--muted); margin-top:3px; line-height:1.3; }
+  .grow { flex:1 1 auto; }
+  input[type="range"] { -webkit-appearance:none; appearance:none; width:170px; height:4px; border-radius:4px;
+    background: var(--line); outline:none; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; width:18px; height:18px; border-radius:50%;
+    background: var(--aqua); border:2px solid #0a1a22; box-shadow:0 0 8px rgba(111,230,207,0.5); }
+  input[type="number"], input[type="text"], select {
+    background:#08151b; color:var(--text); border:1px solid var(--line); border-radius:10px;
+    padding:8px 10px; font-size:14px; outline:none; }
+  input[type="number"] { width:84px; text-align:center; }
+  input[type="text"] { width:130px; }
+  select { min-width:120px; }
+  .val { display:inline-block; min-width:46px; text-align:right; color:var(--aqua); font-variant-numeric:tabular-nums; font-size:14px; }
+  .unit { color:var(--muted); font-size:13px; margin-left:4px; }
+  .switch { position:relative; width:52px; height:30px; }
+  .switch input { display:none; }
+  .slider { position:absolute; inset:0; background:#0d2129; border:1px solid var(--line); border-radius:30px; transition:.2s; }
+  .slider:before { content:""; position:absolute; width:22px; height:22px; left:3px; top:3px; background:var(--muted); border-radius:50%; transition:.2s; }
+  .switch input:checked + .slider { background:#0f3b39; border-color:var(--aqua-dim); }
+  .switch input:checked + .slider:before { transform:translateX(22px); background:var(--aqua); }
+  .wxstatus { font-size:12.5px; color:var(--muted); min-height:16px; margin-top:-4px; }
+  .wxstatus.ok { color:var(--aqua); }
+  .wxstatus.err { color:#e88; }
+  .btns { display:flex; gap:10px; justify-content:space-between; align-items:center; margin-top:16px; }
+  button { font-size:14px; border-radius:10px; padding:10px 16px; cursor:pointer; border:1px solid var(--line);
+    background:#0d222a; color:var(--text); letter-spacing:0.03em; }
+  button.primary { background:var(--aqua); color:#06151a; border-color:var(--aqua); font-weight:700; }
+  button.ghost { background:transparent; color:var(--muted); }
+  .small { font-size:12px; padding:7px 12px; }
+</style>
+</head>
+<body>
+  <canvas id="screen"></canvas>
+
+  <div id="settings">
+    <div class="card" id="card">
+      <h1>Aquarium Clock</h1>
+      <p class="sub">Tap anywhere outside this panel to close.</p>
+
+      <div class="sec">
+        <h2>Display</h2>
+        <div class="row">
+          <label for="selUnit">Temperature units</label>
+          <select id="selUnit">
+            <option value="F">Fahrenheit (&deg;F)</option>
+            <option value="C">Celsius (&deg;C)</option>
+          </select>
+        </div>
+        <div class="row">
+          <div><label for="chkOutside">Show outside temperature</label></div>
+          <label class="switch"><input type="checkbox" id="chkOutside"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <label for="inpClock">Clock size</label>
+          <div><input type="range" id="inpClock" min="0.6" max="1.6" step="0.05"><span class="val" id="clockVal"></span></div>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Outside weather (Internet)</h2>
+        <div class="row">
+          <label for="inpZip">Zip / postal code</label>
+          <input type="text" id="inpZip" inputmode="numeric" placeholder="e.g. 10001" />
+        </div>
+        <div class="row">
+          <label for="inpCountry">Country code</label>
+          <input type="text" id="inpCountry" maxlength="3" placeholder="US" />
+        </div>
+        <div class="row">
+          <div><label for="chkLive">Use outside temp for water color</label>
+            <div class="hint">When on, the aquarium water reflects the real temperature where you are.</div></div>
+          <label class="switch"><input type="checkbox" id="chkLive"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <div><label for="chkLiveHum">Use outside humidity for plants</label>
+            <div class="hint">When on, real humidity makes the plants wither (dry) or overgrow (humid).</div></div>
+          <label class="switch"><input type="checkbox" id="chkLiveHum"><span class="slider"></span></label>
+        </div>
+        <div class="wxstatus" id="wxStatus"></div>
+        <div class="row" style="justify-content:flex-end">
+          <button class="small" id="btnRefresh">Refresh now</button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Water color range</h2>
+        <div class="row">
+          <div><label for="inpCold">Cold end (bluest)</label>
+            <div class="hint">Water is fully blue at or below this temperature.</div></div>
+          <div><input type="number" id="inpCold" step="1"><span class="unit" id="coldUnit">&deg;F</span></div>
+        </div>
+        <div class="row">
+          <div><label for="inpHot">Hot end (reddest)</label>
+            <div class="hint">Water is fully red at or above this. Teal-green sits in the middle.</div></div>
+          <div><input type="number" id="inpHot" step="1"><span class="unit" id="hotUnit">&deg;F</span></div>
+        </div>
+        <div class="row">
+          <div><label for="inpManual">Manual water temp</label>
+            <div class="hint">Used when "use outside temp" is off or unavailable.</div></div>
+          <div><input type="number" id="inpManual" step="1"><span class="unit" id="manualUnit">&deg;F</span></div>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Environment (Livegrid effects)</h2>
+        <div class="row">
+          <div><label for="inpHum">Humidity</label>
+            <div class="hint">Low dries the plants out; high makes them overgrow. Overridden when "use outside humidity" is on.</div></div>
+          <div><input type="range" id="inpHum" min="0" max="100" step="1"><span class="val" id="humVal"></span></div>
+        </div>
+        <div class="row">
+          <div><label for="inpCo2">CO&#8322;</label>
+            <div class="hint">~420 outdoors, 600 fine. 1000+ makes fish &amp; dots slow and lose health; 2000 freezes and kills them. Can't be read from weather.</div></div>
+          <div><input type="range" id="inpCo2" min="400" max="2500" step="20"><span class="val" id="co2Val"></span></div>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Aquarium life</h2>
+        <div class="row">
+          <label for="inpFish">Fish</label>
+          <div><input type="range" id="inpFish" min="0" max="30" step="1"><span class="val" id="fishVal"></span></div>
+        </div>
+        <div class="row">
+          <label for="inpPlants">Plants</label>
+          <div><input type="range" id="inpPlants" min="0" max="12" step="1"><span class="val" id="plantsVal"></span></div>
+        </div>
+        <div class="row">
+          <label for="inpBoids">Schooling dots (per group)</label>
+          <div><input type="range" id="inpBoids" min="0" max="24" step="1"><span class="val" id="boidsVal"></span></div>
+        </div>
+        <div class="row">
+          <label for="selLed">LED grid</label>
+          <select id="selLed">
+            <option value="fine">Fine (160&times;90)</option>
+            <option value="normal">Normal (128&times;72)</option>
+            <option value="chunky">Chunky (96&times;54)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="btns">
+        <button class="ghost" id="btnReset">Reset to defaults</button>
+        <button class="primary" id="btnClose">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="bundle.js"></script>
+</body>
+</html>
