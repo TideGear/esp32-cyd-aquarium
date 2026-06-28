@@ -15,10 +15,6 @@ Cheap Yellow Display. It's adapted from
   <img src="docs/images/cyd-aquarium-demo.gif" alt="ESP32 CYD Aquarium running on a Cheap Yellow Display" width="360">
 </p>
 
-<p align="center">
-  <a href="docs/images/aquarium.mp4">MP4 video</a>
-</p>
-
 It turns one of these small 2.8 inch ESP32 touchscreens into a self-running
 desk aquarium: moving water, a handful of small creatures, plants, drifting
 food, and a 12-hour clock. Give it Wi-Fi and it syncs the time over NTP; leave
@@ -121,6 +117,7 @@ See [docs/WIFI_TIME.md](docs/WIFI_TIME.md).
 - [Wi-Fi and NTP setup](docs/WIFI_TIME.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Development notes](docs/DEVELOPMENT_NOTES.md)
+- [Android (WebView) port](android/README.md)
 - [Attribution](docs/ATTRIBUTION.md)
 
 ## Support ☕
