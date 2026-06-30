@@ -77,7 +77,7 @@ export class AquariumWater {
     return this;
   }
 
-  update({ framebuffer, temperatureC = ENVIRONMENT.NORMAL_TEMPERATURE_C, now = 0 } = {}) {
+  update({ framebuffer, temperatureC = ENVIRONMENT.NORMAL_TEMPERATURE_C, now = 0, debug = true } = {}) {
     if (!framebuffer?.background) {
       throw new Error("AquariumWater.update requires a framebuffer with a background layer");
     }
@@ -89,7 +89,7 @@ export class AquariumWater {
       this.currentRow = 0;
       this.lastRowsUpdated = 0;
       this.lastApplied = true;
-      return this.getDebugSnapshot();
+      return debug ? this.getDebugSnapshot() : null;
     }
 
     const paletteIndex = temperatureToPaletteIndex(temperatureC);
@@ -110,7 +110,7 @@ export class AquariumWater {
     this.lastPaletteIndex = paletteIndex;
     this.lastRowsUpdated = endRow - startRow;
     this.lastApplied = false;
-    return this.getDebugSnapshot();
+    return debug ? this.getDebugSnapshot() : null;
   }
 
   getDebugSnapshot() {

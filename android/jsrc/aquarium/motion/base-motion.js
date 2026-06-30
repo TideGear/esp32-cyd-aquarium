@@ -88,12 +88,12 @@ export class Motion {
     throw new Error("Motion subclasses must implement doMotion()");
   }
 
-  update({ age = AGE.AGE_ADULT, co2 = CO2_THRESHOLDS.CO2_OK, stayInside = false, now = 0 } = {}) {
+  update({ age = AGE.AGE_ADULT, co2 = CO2_THRESHOLDS.CO2_OK, stayInside = false, now = 0, debug = true } = {}) {
     this.co2 = co2;
 
     if (age < AGE.AGE_EGG) {
       this.vel = new Vector2();
-      return this.getDebugSnapshot();
+      return debug ? this.getDebugSnapshot() : null;
     }
 
     if (stayInside || co2 > CO2_THRESHOLDS.CO2_BAD) {
@@ -129,7 +129,7 @@ export class Motion {
     this.angle = this.vel.heading();
     this.followingFood = false;
 
-    return this.getDebugSnapshot();
+    return debug ? this.getDebugSnapshot() : null;
   }
 
   applyForce(force) {

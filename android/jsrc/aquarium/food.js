@@ -109,7 +109,7 @@ export class AquariumFoodManager {
     }
   }
 
-  update({ framebuffer } = {}) {
+  update({ framebuffer, debug = true } = {}) {
     if (!framebuffer?.foreground) {
       throw new Error("AquariumFoodManager.update requires a framebuffer with a foreground layer");
     }
@@ -123,7 +123,7 @@ export class AquariumFoodManager {
       }
     }
     this.food = remaining;
-    return this.getDebugSnapshot();
+    return debug ? this.getDebugSnapshot() : null;
   }
 
   getDebugSnapshot() {

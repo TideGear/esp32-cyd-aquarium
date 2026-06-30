@@ -125,45 +125,61 @@ let liveHumidity = null;
 let liveAqi = null;
 let placeName = "";
 let lastWeather = 0;
+
+const WEATHER_TIMEOUT_MS = 12000;
+let weatherRequestId = 0;
+const fetchWithTimeout = async (url, options = {}) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WEATHER_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 function setWx(msg, cls) {
   const el = document.getElementById("wxStatus");
   if (el) { el.textContent = msg; el.className = "wxstatus" + (cls ? " " + cls : ""); }
 }
 async function fetchOutsideTemp() {
+  const requestId = ++weatherRequestId;
   const zip = (settings.zip || "").trim();
   const cc = ((settings.country || "US").trim() || "US").toLowerCase();
   if (!zip) { liveTempC = null; liveHumidity = null; liveAqi = null; setWx("Enter a zip code to use outside temperature.", ""); return; }
   setWx("Looking up " + zip + "…", "");
   try {
-    const g = await fetch("https://api.zippopotam.us/" + cc + "/" + encodeURIComponent(zip));
+    const g = await fetchWithTimeout("https://api.zippopotam.us/" + cc + "/" + encodeURIComponent(zip));
     if (!g.ok) throw 0;
     const gj = await g.json();
     const place = gj.places && gj.places[0];
     if (!place) throw 0;
     const lat = parseFloat(place.latitude), lon = parseFloat(place.longitude);
     placeName = place["place name"] || "";
-    const w = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + lat +
+    const w = await fetchWithTimeout("https://api.open-meteo.com/v1/forecast?latitude=" + lat +
       "&longitude=" + lon + "&current=temperature_2m,relative_humidity_2m&temperature_unit=celsius");
     if (!w.ok) throw 0;
     const wj = await w.json();
     const t = wj && wj.current && wj.current.temperature_2m;
     if (typeof t !== "number") throw 0;
+    if (requestId !== weatherRequestId) return;
     liveTempC = t; lastWeather = Date.now();
     const rh = wj.current.relative_humidity_2m;
     liveHumidity = typeof rh === "number" ? rh : null;
     // Air quality drives the CO2 stress mechanic (remapped). Keep it non-fatal:
     // a failed AQI lookup must not blank out the temperature/humidity we just got.
     try {
-      const a = await fetch("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" + lat +
+      const a = await fetchWithTimeout("https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" + lat +
         "&longitude=" + lon + "&current=us_aqi");
       const aj = a.ok ? await a.json() : null;
       const aqi = aj && aj.current && aj.current.us_aqi;
+      if (requestId !== weatherRequestId) return;
       liveAqi = typeof aqi === "number" ? aqi : null;
-    } catch (e2) { liveAqi = null; }
+    } catch (e2) { if (requestId !== weatherRequestId) return; liveAqi = null; }
     const rhTxt = liveHumidity != null ? " · " + Math.round(liveHumidity) + "% RH" : "";
     const aqiTxt = liveAqi != null ? " · AQI " + Math.round(liveAqi) : "";
     setWx(placeName + ": " + dispTemp(t) + "°" + settings.unit + rhTxt + aqiTxt, "ok");
   } catch (e) {
+    if (requestId !== weatherRequestId) return;
     liveTempC = null; liveHumidity = null; liveAqi = null;
     setWx("Could not get weather — check the connection or zip code.", "err");
   }
@@ -587,6 +603,7 @@ function driftOffset(now) {
 /* ------------------------------- main loop -------------------------------- */
 const frameInterval = 1000 / TARGET_FPS;
 let lastFrame = 0;
+let lastClockCacheSecond = -1;
 function loop(now) {
   requestAnimationFrame(loop);
   if (now - lastFrame < frameInterval) return;
@@ -599,12 +616,12 @@ function loop(now) {
   const hum = effectiveHumidity();
   engine.food.handleTouchInput(now);
   engine.fish.assignFood(engine.food.takeUnassignedFood());
-  engine.water.update({ framebuffer, temperatureC: tC, now });
-  engine.boidManager.updateBoids(co2);
+  engine.water.update({ framebuffer, temperatureC: tC, now, debug:false });
+  engine.boidManager.updateBoids(co2, { debug:false });
   engine.boidManager.renderBoids(framebuffer);
-  engine.fish.update({ framebuffer, co2, now });
-  engine.food.update({ framebuffer });
-  engine.plants.update({ framebuffer, humidityPercent: hum, now });
+  engine.fish.update({ framebuffer, co2, now, debug:false });
+  engine.food.update({ framebuffer, debug:false });
+  engine.plants.update({ framebuffer, humidityPercent: hum, now, debug:false });
   while (engine.fish.fish.length > fishTarget) engine.fish.fish.pop();
 
   const bg = background.pixels, fg = foreground.pixels;
@@ -612,7 +629,11 @@ function loop(now) {
 
   maybeStartReset(now);
   const tankAlpha = aquariumOpacity(now);
-  updateClockCache();   // only re-renders the glyphs when the displayed values change
+  const clockSecond = Math.floor(Date.now() / 1000);
+  if (clockSecond !== lastClockCacheSecond) {
+    lastClockCacheSecond = clockSecond;
+    updateClockCache();   // only re-renders the glyphs when displayed values can change
+  }
 
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, RENDER_W, RENDER_H);
   const [dx, dy] = driftOffset(now);

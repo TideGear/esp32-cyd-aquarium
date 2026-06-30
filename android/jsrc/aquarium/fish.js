@@ -120,7 +120,7 @@ export class AquariumFish {
     };
   }
 
-  update({ co2 = CO2_THRESHOLDS.CO2_OK, stayInside = false, now = 0 } = {}) {
+  update({ co2 = CO2_THRESHOLDS.CO2_OK, stayInside = false, now = 0, debug = true } = {}) {
     if (!this.motion) {
       this.motion = createMotionFromLogicalPanel(this.fishDefinition.motionType, {
         position: this.position,
@@ -131,7 +131,7 @@ export class AquariumFish {
       });
     }
 
-    this.motion.update({ age: this.age, co2, stayInside, now });
+    this.motion.update({ age: this.age, co2, stayInside, now, debug });
     this.position = this.motion.getLogicalPosition(this.physicsScale);
     this.updateAge(co2, now);
     this.updateHealth(co2);
@@ -146,7 +146,6 @@ export class AquariumFish {
     this.updateFoodTarget();
     this.fishDefinition.age = this.age;
     this.fishDefinition.health = this.health;
-    this.fishDefinition.colors = this.body.getColorPaletteHSV();
 
     if (this.age > AGE.AGE_DEAD) {
       this.age = 0;
@@ -367,10 +366,10 @@ export class AquariumFishManager {
     }
   }
 
-  update({ framebuffer, co2 = CO2_THRESHOLDS.CO2_OK, stayInside = false, now = 0 } = {}) {
+  update({ framebuffer, co2 = CO2_THRESHOLDS.CO2_OK, stayInside = false, now = 0, debug = true } = {}) {
     const survivors = [];
     for (const fish of this.fish) {
-      const destroy = fish.update({ co2, stayInside, now });
+      const destroy = fish.update({ co2, stayInside, now, debug });
       if (!destroy) {
         fish.display({ framebuffer, now });
         survivors.push(fish);
@@ -398,7 +397,7 @@ export class AquariumFishManager {
       }
     }
 
-    return this.getDebugSnapshot();
+    return debug ? this.getDebugSnapshot() : null;
   }
 
   getDebugSnapshot() {
