@@ -9,7 +9,7 @@
  * scene to avoid burn-in, and adds a tap-to-open settings panel including a
  * zip-code outside-temperature feed that colours the water.
  */
-import { FramebufferLayer, blendPackedOver } from "./aquarium/framebuffer.js";
+import { FramebufferLayer, blendPackedOver, writePackedPixelsToRGBAData } from "./aquarium/framebuffer.js";
 import { createAquariumEngine } from "./aquarium/engine.js";
 import { Boid } from "./aquarium/boid.js";
 import { BOIDS } from "./aquarium/constants.js";
@@ -18,6 +18,8 @@ import { SeededRandom } from "./aquarium/random.js";
 /* One fresh random seed per app launch so the tank differs every time.
    (The upstream JS port hardcodes its seeds, which made every launch identical.) */
 const LAUNCH_SEED = (Date.now() >>> 0) || 1;
+/* The seed that produced the current tank. Auto-reset bumps it to grow a new one. */
+let sceneSeed = LAUNCH_SEED;
 
 /* ---- exact 3x5 glyph atlas, copied verbatim from aquarium/pixel-text.js ---- */
 const GLYPHS = {
@@ -44,17 +46,39 @@ const GLYPHS = {
 };
 
 /* --------------------------------- fixed config --------------------------- */
-const RENDER_W = 1920, RENDER_H = 1080;     // backing resolution (1080p)
-const OVERSCAN = 96;                         // aquarium bleed for drift
 const DOT_RADIUS_RATIO = 0.43;               // identical to aquarium/renderer.js
 const TARGET_FPS = 30;
-const LED_DIMS = { fine:[160,90], normal:[128,72], chunky:[96,54] };
+const RENDER_LONG_EDGE = 1920;               // backing px budget on the long edge
+const OVERSCAN_RATIO = 0.05;                 // aquarium bleed for drift (~96px @ 1920)
+
+/* LED-grid resolution presets, defined at their NATIVE orientation. The
+   orientation setting swaps W/H for non-square panels so the grid is never
+   sideways; square panels (the original C++ matrix) are orientation-agnostic. */
+const PANELS = {
+  fine:     { label:"Fine",         w:160, h:90  },
+  normal:   { label:"Normal",       w:128, h:72  },
+  chunky:   { label:"Chunky",       w:96,  h:54  },
+  original: { label:"Original C++", w:64,  h:64  },   // OMatrixSettings.h 64x64
+  cyd:      { label:"CYD",          w:240, h:320 },   // ESP32-2432S028R 240x320
+};
 
 /* clock colours, taken from the device's renderClockOverlay() */
-const C_TIME="rgb(224,248,238)", C_TIME_GLOW="rgba(150,255,225,0.55)";
-const C_SUB="rgb(132,222,190)",  C_SUB_GLOW="rgba(110,222,188,0.45)";
 const C_SHADOW="rgb(0,6,8)";
 const BASE = { TIME:42, AMPM:15, DATE:19, WEEK:16, OUT:15 };
+
+/* Per-element clock colors. Each is a user-editable #rrggbb hex; the neon glow
+   is derived from it at draw time. This list also drives the settings UI order.
+   Defaults reproduce the original two-tone look (bright time, teal everything else). */
+const COLOR_ELEMENTS = [
+  ["time","Time"], ["ampm","AM / PM"], ["seconds","Seconds"],
+  ["day","Weekday"], ["date","Date"],
+  ["temp","Temperature"], ["humidity","Humidity"], ["aqi","Air quality (AQI)"],
+];
+const COLOR_DEFAULTS = {
+  time:"#e0f8ee", ampm:"#84debe", seconds:"#84debe",
+  day:"#84debe", date:"#84debe",
+  temp:"#84debe", humidity:"#84debe", aqi:"#84debe",
+};
 
 /* ------------------------------- settings model --------------------------- */
 const SKEY = "aquaclock.settings";
@@ -63,8 +87,11 @@ function defaults() {
     unit:"F", zip:"", country:"US", useLive:true,
     manualTempC:21, waterMinC:10, waterMaxC:35,
     humidityPercent:50, co2ppm:420, useLiveHumidity:true, useLiveAqi:true,
-    showOutside:true, clockScale:1.0,
-    fishCount:11, plantCount:5, boidsPerGroup:15, ledSize:"normal",
+    showTemp:true, showHumidity:true, showAqi:true, clockScale:1.0,
+    fishCount:11, plantCount:5, boidsPerGroup:15,
+    ledSize:"normal", orientation:"landscape",
+    autoReset:false, resetH:0, resetM:30, resetS:0, glow:true,
+    colors: Object.assign({}, COLOR_DEFAULTS),
   };
 }
 let settings = loadSettings();
@@ -72,7 +99,14 @@ function loadSettings() {
   const d = defaults();
   try {
     const raw = localStorage.getItem(SKEY);
-    if (raw) return Object.assign(d, JSON.parse(raw));
+    if (raw) {
+      const saved = JSON.parse(raw);
+      // migrate the old single "showOutside" toggle to the temperature readout
+      if (saved.showOutside !== undefined && saved.showTemp === undefined) saved.showTemp = saved.showOutside;
+      const merged = Object.assign(d, saved);
+      merged.colors = Object.assign({}, COLOR_DEFAULTS, saved.colors || {});  // keep new keys if added later
+      return merged;
+    }
   } catch (e) {}
   return d;
 }
@@ -168,24 +202,68 @@ function effectiveCO2() {
 
 /* ------------------------------ scene / engine ---------------------------- */
 let LW, LH, background, foreground, composite, framebuffer, engine, fishTarget;
-let SCALE_X, SCALE_Y, DOT_R;
-const VP_X = -OVERSCAN, VP_Y = -OVERSCAN, VP_W = RENDER_W + OVERSCAN * 2, VP_H = RENDER_H + OVERSCAN * 2;
+let SCALE_X, SCALE_Y, DOT_R, USE_RECT;
+let RENDER_W, RENDER_H, OVERSCAN, VP_X, VP_Y, VP_W, VP_H;
+
+/* Selected panel resolution, re-oriented: square panels ignore orientation;
+   others are swapped so their long edge follows the chosen orientation. */
+function panelDims() {
+  const p = PANELS[settings.ledSize] || PANELS.normal;
+  let w = p.w, h = p.h;
+  const portrait = settings.orientation === "portrait";
+  if (portrait && w > h) { const t = w; w = h; h = t; }
+  if (!portrait && h > w) { const t = w; w = h; h = t; }
+  return [w, h];
+}
+/* Backing resolution that yields square dots: equal px pitch on both axes,
+   long edge ~= RENDER_LONG_EDGE. */
+function renderDims(lw, lh) {
+  const pitch = Math.max(1, Math.round(RENDER_LONG_EDGE / Math.max(lw, lh)));
+  return [lw * pitch, lh * pitch];
+}
 
 function recomputeViewport() {
+  VP_X = -OVERSCAN; VP_Y = -OVERSCAN; VP_W = RENDER_W + OVERSCAN * 2; VP_H = RENDER_H + OVERSCAN * 2;
   SCALE_X = VP_W / LW; SCALE_Y = VP_H / LH;
   DOT_R = Math.max(0.5, Math.min(SCALE_X, SCALE_Y) * DOT_RADIUS_RATIO);
+  // Dense panels (e.g. CYD 240x320 ~ 77k cells) have tiny dots: draw solid cells
+  // instead, which both reads better at that pitch and is far cheaper than
+  // tens of thousands of per-cell arc fills every frame.
+  USE_RECT = DOT_R < 3 || LW * LH > 30000;
 }
+/* Drive the display orientation. Preferred path: ask Android to actually rotate
+   the activity, so the OS detects which way is up and the window becomes truly
+   portrait (no CSS rotation needed). Browser fallback: rotate the canvas 90deg. */
+function applyDisplayOrientation() {
+  const portrait = settings.orientation === "portrait";
+  let native = false;
+  try { if (window.AndroidClip && AndroidClip.setOrientation) { AndroidClip.setOrientation(portrait ? "portrait" : "landscape"); native = true; } } catch (e) {}
+  const st = canvas.style;
+  if (!native && portrait) {
+    st.position = "fixed"; st.inset = "auto"; st.left = "50%"; st.top = "50%";
+    st.width = window.innerHeight + "px"; st.height = window.innerWidth + "px";
+    st.transform = "translate(-50%,-50%) rotate(90deg)";
+  } else {
+    st.position = ""; st.inset = ""; st.left = ""; st.top = ""; st.width = ""; st.height = ""; st.transform = "";
+  }
+}
+
 function buildScene() {
-  const dims = LED_DIMS[settings.ledSize] || LED_DIMS.normal;
+  const dims = panelDims();
   LW = dims[0]; LH = dims[1];
+  [RENDER_W, RENDER_H] = renderDims(LW, LH);
+  OVERSCAN = Math.round(Math.max(RENDER_W, RENDER_H) * OVERSCAN_RATIO);
+  canvas.width = RENDER_W; canvas.height = RENDER_H;
+  ctx.imageSmoothingEnabled = false;
+  applyDisplayOrientation();
   background = new FramebufferLayer(LW, LH, { name:"background", transparent:false, clearColor:{ r:0,g:0,b:0,a:255 } });
   foreground = new FramebufferLayer(LW, LH, { name:"foreground", transparent:true });
   composite = new Uint32Array(LW * LH);
-  framebuffer = { width:LW, height:LH, modeId:"cyd-landscape", background, foreground };
-  const mode = { id:"cyd-landscape", logicalWidth:LW, logicalHeight:LH, physicalWidth:RENDER_W, physicalHeight:RENDER_H };
+  framebuffer = { width:LW, height:LH, modeId:"cyd-panel", background, foreground };
+  const mode = { id:"cyd-panel", logicalWidth:LW, logicalHeight:LH, physicalWidth:RENDER_W, physicalHeight:RENDER_H };
   engine = createAquariumEngine({ mode, disableStateLoad:true });
   // Per-launch food drop positions (else identical each launch, like the port's default).
-  try { engine.food.rng = new SeededRandom((LAUNCH_SEED ^ 0x0f00d123) >>> 0); } catch (e) {}
+  try { engine.food.rng = new SeededRandom((sceneSeed ^ 0x0f00d123) >>> 0); } catch (e) {}
   applyCounts();
   recomputeViewport();
 }
@@ -193,19 +271,19 @@ function applyCounts() {
   // Re-seed every generator from this launch's seed so species/colors/positions,
   // plants and boids are randomized per launch instead of frozen to the port's
   // fixed default seeds (matching the original C++, which seeds from the clock).
-  try { engine.fish.rng = new SeededRandom(LAUNCH_SEED); } catch (e) {}
+  try { engine.fish.rng = new SeededRandom(sceneSeed); } catch (e) {}
   try { engine.fish.initializeFish(settings.fishCount); } catch (e) {}
   fishTarget = settings.fishCount;
   // Plants re-seed from rngSeed inside resize(), so set the seed (not the rng).
   try {
-    engine.plants.rngSeed = (LAUNCH_SEED ^ 0x00a71a17) >>> 0;
+    engine.plants.rngSeed = (sceneSeed ^ 0x00a71a17) >>> 0;
     engine.plants.count = settings.plantCount; engine.plants.width = 0; engine.plants.resize(LW, LH);
   } catch (e) {}
   applyBoids(settings.boidsPerGroup);
 }
 function applyBoids(n) {
   const bm = engine.boidManager;
-  const rng = new SeededRandom((LAUNCH_SEED ^ 0xb01d123) >>> 0);
+  const rng = new SeededRandom((sceneSeed ^ 0xb01d123) >>> 0);
   bm.boidGroups = [];
   for (let g = 0; g < BOIDS.GROUPS; g++) {
     const arr = [];
@@ -219,11 +297,75 @@ function applyBoids(n) {
   }
 }
 
+/* Grow a brand-new tank in place: pick a fresh seed and re-seed every generator
+   (fish, plants, boids, food). Keeps the current panel/orientation and canvas. */
+function regenerateAquarium() {
+  sceneSeed = ((Date.now() >>> 0) ^ Math.imul(sceneSeed, 2654435761)) >>> 0 || 1;
+  try { engine.food.rng = new SeededRandom((sceneSeed ^ 0x0f00d123) >>> 0); } catch (e) {}
+  applyCounts();
+}
+
+/* --------------------------- auto-reset + fade ---------------------------- */
+/* Periodically dissolve the tank and grow a new one. The fade dips the AQUARIUM
+   layer's opacity to 0 and back (the clock keeps drawing at full opacity), and
+   the swap happens at the dark midpoint so it is never visible. */
+const FADE_HALF_MS = 2500;                 // 2.5s out + 2.5s in = 5s total
+let fadePhase = "idle";                    // "out" | "in" | "idle"
+let fadeStart = 0;
+let nextResetAt = 0;                        // 0 => (re)initialize from current time
+
+function resetIntervalMs() {
+  const h = settings.resetH | 0, m = settings.resetM | 0, s = settings.resetS | 0;
+  return Math.max(0, (h * 3600 + m * 60 + s) * 1000);
+}
+/* Force the countdown to restart relative to "now" on the next frame. */
+function rescheduleReset() { nextResetAt = 0; }
+
+function maybeStartReset(now) {
+  if (fadePhase !== "idle") return;
+  const interval = resetIntervalMs();
+  if (!settings.autoReset || interval <= 0) { nextResetAt = 0; return; }
+  if (nextResetAt === 0) { nextResetAt = now + interval; return; }
+  if (now >= nextResetAt) { fadePhase = "out"; fadeStart = now; nextResetAt = now + interval; }
+}
+
+/* Returns the aquarium-layer opacity for this frame and advances the fade. */
+function aquariumOpacity(now) {
+  if (fadePhase === "out") {
+    const t = (now - fadeStart) / FADE_HALF_MS;
+    if (t >= 1) { regenerateAquarium(); fadePhase = "in"; fadeStart = now; return 0; }
+    return 1 - t;
+  }
+  if (fadePhase === "in") {
+    const t = (now - fadeStart) / FADE_HALF_MS;
+    if (t >= 1) { fadePhase = "idle"; return 1; }
+    return t;
+  }
+  return 1;
+}
+
 /* ------------------------------- canvas setup ----------------------------- */
 const canvas = document.getElementById("screen");
-canvas.width = RENDER_W; canvas.height = RENDER_H;
 const ctx = canvas.getContext("2d", { alpha:false });
-ctx.imageSmoothingEnabled = false;
+ctx.imageSmoothingEnabled = false;  // backing size is set in buildScene()
+
+let CTX = ctx;                                 // active draw target for LED glyphs
+// Clock is cached in two layers: slow (digits/date/week/air, ~once a minute) and
+// fast (blinking colon + seconds, each second). Both blitted every frame.
+let clockSlowCanvas = null, clockSlowCtx = null, clockSlowKey = "";
+let clockFastCanvas = null, clockFastCtx = null, clockFastKey = "";
+let gridCanvas = null, gridCtx = null, gridImage = null;  // LWxLH scratch for dense-panel blit
+function ensureClockCanvases() {
+  if (!clockSlowCanvas) {
+    clockSlowCanvas = document.createElement("canvas"); clockSlowCtx = clockSlowCanvas.getContext("2d");
+    clockFastCanvas = document.createElement("canvas"); clockFastCtx = clockFastCanvas.getContext("2d");
+  }
+  if (clockSlowCanvas.width !== RENDER_W || clockSlowCanvas.height !== RENDER_H) {
+    clockSlowCanvas.width = RENDER_W; clockSlowCanvas.height = RENDER_H;
+    clockFastCanvas.width = RENDER_W; clockFastCanvas.height = RENDER_H;
+    clockSlowKey = ""; clockFastKey = "";   // resized canvases are cleared; force a re-render
+  }
+}
 
 const colorCache = new Map();
 function cssFor(rgb) {
@@ -232,6 +374,20 @@ function cssFor(rgb) {
   return s;
 }
 function drawAquariumDots() {
+  if (USE_RECT) {
+    // Dense panels: one ImageData upload + one scaled blit instead of tens of
+    // thousands of per-cell fills. Nearest-neighbour scaling keeps the crisp
+    // square-pixel look the per-cell path produced.
+    if (!gridCanvas) { gridCanvas = document.createElement("canvas"); gridCtx = gridCanvas.getContext("2d"); }
+    if (gridCanvas.width !== LW || gridCanvas.height !== LH) {
+      gridCanvas.width = LW; gridCanvas.height = LH; gridImage = gridCtx.createImageData(LW, LH);
+    }
+    writePackedPixelsToRGBAData(composite, gridImage.data);
+    gridCtx.putImageData(gridImage, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(gridCanvas, 0, 0, LW, LH, VP_X, VP_Y, VP_W, VP_H);
+    return;
+  }
   for (let y = 0; y < LH; y++) {
     const cy = VP_Y + (y + 0.5) * SCALE_Y, rowBase = y * LW;
     for (let x = 0; x < LW; x++) {
@@ -250,19 +406,57 @@ function drawAquariumDots() {
 /* ------------------------------ clock drawing ----------------------------- */
 function glyphWidth(ch) { const g = GLYPHS[ch] || GLYPHS[" "]; let w = 0; for (let i = 0; i < g.length; i++) if (g[i].length > w) w = g[i].length; return w; }
 function measure(text, cell) { let w = 0; for (let i = 0; i < text.length; i++) { w += glyphWidth(text[i]) * cell; if (i < text.length - 1) w += cell; } return w; }
+/* drawLed advances the pen by (glyphWidth+1)*cell per char; this is that advance
+   so consecutive segments line up exactly with a single combined draw. */
+function advanceWidth(text, cell) { let w = 0; for (let i = 0; i < text.length; i++) w += (glyphWidth(text[i]) + 1) * cell; return w; }
+
+/* ---- per-element clock colors ---- */
+const clamp255 = (v) => { v = v | 0; return v < 0 ? 0 : v > 255 ? 255 : v; };
+function hexToRgb(hex) {
+  let h = (hex || "").replace("#", "");
+  if (h.length === 3) h = h.replace(/(.)/g, "$1$1");
+  const n = parseInt(h, 16);
+  if (!isFinite(n) || h.length !== 6) return { r:255, g:255, b:255 };
+  return { r:(n >> 16) & 255, g:(n >> 8) & 255, b:n & 255 };
+}
+const rgbToHex = (r, g, b) => "#" + [r, g, b].map((v) => clamp255(v).toString(16).padStart(2, "0")).join("");
+const colorHex = (key) => (settings.colors && settings.colors[key]) || COLOR_DEFAULTS[key];
+function clockColor(key) { const c = hexToRgb(colorHex(key)); return "rgb(" + c.r + "," + c.g + "," + c.b + ")"; }
+function clockGlow(key) { const c = hexToRgb(colorHex(key)); return "rgba(" + c.r + "," + c.g + "," + c.b + ",0.5)"; }
+/* Accepts "#rrggbb", "rrggbb", "#rgb", or "rgb(r,g,b)"; returns a #rrggbb or null. */
+function parseColor(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+  let m = s.match(/^#?([0-9a-fA-F]{6})$/); if (m) return "#" + m[1].toLowerCase();
+  m = s.match(/^#?([0-9a-fA-F]{3})$/); if (m) return "#" + m[1].toLowerCase().replace(/(.)/g, "$1$1");
+  m = s.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i); if (m) return rgbToHex(+m[1], +m[2], +m[3]);
+  return null;
+}
+/* Clipboard via the native bridge when present (reliable on file://), else the
+   Web Clipboard API. Both return a Promise so callers are uniform. */
+function clipboardCopy(text) {
+  try { if (window.AndroidClip && AndroidClip.copy) { AndroidClip.copy(text); return Promise.resolve(true); } } catch (e) {}
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text).then(() => true, () => false);
+  return Promise.resolve(false);
+}
+function clipboardPaste() {
+  try { if (window.AndroidClip && AndroidClip.paste) return Promise.resolve(AndroidClip.paste() || ""); } catch (e) {}
+  if (navigator.clipboard && navigator.clipboard.readText) return navigator.clipboard.readText().then((t) => t, () => "");
+  return Promise.resolve("");
+}
 function drawLed(text, startX, topY, cell, color, glowColor, glowBlur) {
   const r = cell * 0.42;
-  ctx.fillStyle = color; ctx.shadowColor = glowColor; ctx.shadowBlur = glowBlur;
+  CTX.fillStyle = color; CTX.shadowColor = glowColor; CTX.shadowBlur = settings.glow ? glowBlur : 0;
   let cx = startX;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i], g = GLYPHS[ch] || GLYPHS[" "], gw = glyphWidth(ch);
     for (let row = 0; row < g.length; row++) { const line = g[row];
       for (let col = 0; col < line.length; col++) { if (line[col] !== "1") continue;
-        ctx.beginPath(); ctx.arc(cx + col * cell + cell / 2, topY + row * cell + cell / 2, r, 0, 6.283185307179586); ctx.fill();
+        CTX.beginPath(); CTX.arc(cx + col * cell + cell / 2, topY + row * cell + cell / 2, r, 0, 6.283185307179586); CTX.fill();
       } }
     cx += (gw + 1) * cell;
   }
-  ctx.shadowBlur = 0;
+  CTX.shadowBlur = 0;
 }
 function drawLedFx(text, startX, topY, cell, color, glowColor, glowBlur) {
   const off = Math.max(2, Math.round(cell * 0.14));
@@ -274,46 +468,113 @@ function drawLedCenteredFx(text, cx, topY, cell, color, glowColor, glowBlur) {
 }
 const WEEKDAYS = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"];
 const pad2 = (n) => (n < 10 ? "0" + n : "" + n);
-function outsideText() {
-  if (settings.showOutside && liveTempC != null) return dispTemp(liveTempC) + settings.unit;
-  return "";
+/* Outside readout under the clock: temperature / humidity / AQI, each gated by
+   its toggle and shown only when the live value is available. The 3x5 LED font
+   has no % or degree glyph, so humidity is suffixed "RH" (relative humidity). */
+function outsideSegments() {
+  const segs = [];
+  if (settings.showTemp && liveTempC != null) segs.push({ text: dispTemp(liveTempC) + settings.unit, key:"temp" });
+  if (settings.showHumidity && liveHumidity != null) segs.push({ text: Math.round(liveHumidity) + "RH", key:"humidity" });
+  if (settings.showAqi && liveAqi != null) segs.push({ text: "AQI " + Math.round(liveAqi), key:"aqi" });
+  return segs;
 }
-function drawClock() {
-  const sc = settings.clockScale;
-  const TIME = Math.round(BASE.TIME * sc), AMPM = Math.round(BASE.AMPM * sc),
-        DATE = Math.round(BASE.DATE * sc), WEEK = Math.round(BASE.WEEK * sc), OUT = Math.round(BASE.OUT * sc);
-
+function clockStrings() {
   const d = new Date();
   let h = d.getHours(); const ampm = h >= 12 ? "PM" : "AM"; let h12 = h % 12; if (h12 === 0) h12 = 12;
   const colon = d.getSeconds() % 2 === 0 ? ":" : " ";   // blinking colon, as on the device
-  const timeStr = h12 + colon + pad2(d.getMinutes());
-  const secStr = pad2(d.getSeconds());
-  const dateStr = pad2(d.getMonth() + 1) + "/" + pad2(d.getDate()) + "/" + d.getFullYear();
-  const weekStr = WEEKDAYS[d.getDay()];
-  const outStr = outsideText();
-
-  const timeH = 5 * TIME, weekH = 5 * WEEK, dateH = 5 * DATE, outH = outStr ? 5 * OUT : 0;
+  const hStr = "" + h12, minStr = pad2(d.getMinutes());
+  return {
+    hStr, minStr, ampm, colon,
+    timeStrSlow: hStr + " " + minStr,   // colon slot blank (space and ":" are the same width, so layout is stable)
+    secStr: pad2(d.getSeconds()),
+    dateStr: pad2(d.getMonth() + 1) + "/" + pad2(d.getDate()) + "/" + d.getFullYear(),
+    weekStr: WEEKDAYS[d.getDay()],
+    outSegs: outsideSegments(),
+  };
+}
+function clockMetrics() {
+  const sc = settings.clockScale;
+  return {
+    TIME: Math.round(BASE.TIME * sc), AMPM: Math.round(BASE.AMPM * sc),
+    DATE: Math.round(BASE.DATE * sc), WEEK: Math.round(BASE.WEEK * sc), OUT: Math.round(BASE.OUT * sc),
+  };
+}
+function clockLayout(c, m) {
+  const { TIME, AMPM, DATE, WEEK, OUT } = m;
+  const hasOut = c.outSegs.length > 0;
+  const timeH = 5 * TIME, weekH = 5 * WEEK, dateH = 5 * DATE, outH = hasOut ? 5 * OUT : 0;
   const g1 = Math.round(TIME * 1.0), g2 = Math.round(DATE * 0.95), g3 = Math.round(DATE * 0.9);
-  let total = timeH + g1 + weekH + g2 + dateH + (outStr ? g3 + outH : 0);
-
+  const total = timeH + g1 + weekH + g2 + dateH + (hasOut ? g3 + outH : 0);
   const cx = RENDER_W / 2;
   const timeTopY = Math.round((RENDER_H - total) / 2);
-  const weekTopY = timeTopY + timeH + g1;
-  const dateTopY = weekTopY + weekH + g2;
-  const outTopY = dateTopY + dateH + g3;
-
-  drawLedCenteredFx(timeStr, cx, timeTopY, TIME, C_TIME, C_TIME_GLOW, TIME * 0.85);
-
-  const timeW = measure(timeStr, TIME);
-  const rightX = Math.round(cx + timeW / 2 + TIME * 0.7);
-  const ampmTopY = timeTopY + Math.round(TIME * 0.2);
-  const secTopY = ampmTopY + 5 * AMPM + Math.round(AMPM * 1.1);
-  drawLedFx(ampm, rightX, ampmTopY, AMPM, C_SUB, C_SUB_GLOW, AMPM * 0.8);
-  drawLedFx(secStr, rightX, secTopY, AMPM, C_SUB, C_SUB_GLOW, AMPM * 0.8);
-
-  drawLedCenteredFx(weekStr, cx, weekTopY, WEEK, C_SUB, C_SUB_GLOW, WEEK * 0.8);
-  drawLedCenteredFx(dateStr, cx, dateTopY, DATE, C_SUB, C_SUB_GLOW, DATE * 0.85);
-  if (outStr) drawLedCenteredFx(outStr, cx, outTopY, OUT, C_SUB, C_SUB_GLOW, OUT * 0.8);
+  const timeStartX = Math.round(cx - measure(c.timeStrSlow, TIME) / 2);
+  const timeW = measure(c.timeStrSlow, TIME);
+  return {
+    cx, hasOut,
+    timeTopY,
+    weekTopY: timeTopY + timeH + g1,
+    dateTopY: timeTopY + timeH + g1 + weekH + g2,
+    outTopY: timeTopY + timeH + g1 + weekH + g2 + dateH + g3,
+    timeStartX,
+    colonX: timeStartX + advanceWidth(c.hStr, TIME),   // colon sits right after the hour digits
+    rightX: Math.round(cx + timeW / 2 + TIME * 0.7),
+    ampmTopY: timeTopY + Math.round(TIME * 0.2),
+    secTopY: timeTopY + Math.round(TIME * 0.2) + 5 * AMPM + Math.round(AMPM * 1.1),
+  };
+}
+/* Slow layer: everything that changes at most once a minute. */
+function renderClockSlow(c) {
+  const m = clockMetrics(), L = clockLayout(c, m), { TIME, AMPM, DATE, WEEK, OUT } = m;
+  drawLedFx(c.timeStrSlow, L.timeStartX, L.timeTopY, TIME, clockColor("time"), clockGlow("time"), TIME * 0.85);
+  drawLedFx(c.ampm, L.rightX, L.ampmTopY, AMPM, clockColor("ampm"), clockGlow("ampm"), AMPM * 0.8);
+  drawLedCenteredFx(c.weekStr, L.cx, L.weekTopY, WEEK, clockColor("day"), clockGlow("day"), WEEK * 0.8);
+  drawLedCenteredFx(c.dateStr, L.cx, L.dateTopY, DATE, clockColor("date"), clockGlow("date"), DATE * 0.85);
+  if (L.hasOut) {
+    const SEP = "  ", sepAdv = advanceWidth(SEP, OUT);
+    let totalAdv = 0;
+    for (let i = 0; i < c.outSegs.length; i++) { totalAdv += advanceWidth(c.outSegs[i].text, OUT); if (i < c.outSegs.length - 1) totalAdv += sepAdv; }
+    let x = Math.round(L.cx - (totalAdv - OUT) / 2);   // each air value in its own color
+    for (let i = 0; i < c.outSegs.length; i++) {
+      const s = c.outSegs[i];
+      drawLedFx(s.text, x, L.outTopY, OUT, clockColor(s.key), clockGlow(s.key), OUT * 0.8);
+      x += advanceWidth(s.text, OUT);
+      if (i < c.outSegs.length - 1) x += sepAdv;
+    }
+  }
+}
+/* Fast layer: only the blinking colon and the seconds (cheap to redraw each second). */
+function renderClockFast(c) {
+  const m = clockMetrics(), L = clockLayout(c, m), { TIME, AMPM } = m;
+  drawLedFx(c.colon, L.colonX, L.timeTopY, TIME, clockColor("time"), clockGlow("time"), TIME * 0.85);
+  drawLedFx(c.secStr, L.rightX, L.secTopY, AMPM, clockColor("seconds"), clockGlow("seconds"), AMPM * 0.8);
+}
+function slowKeyString(c) {
+  let k = c.timeStrSlow + "|" + c.ampm + "|" + c.dateStr + "|" + c.weekStr + "|" + settings.clockScale + "|" + settings.glow + "|" + RENDER_W + "x" + RENDER_H;
+  for (let i = 0; i < COLOR_ELEMENTS.length; i++) k += "|" + colorHex(COLOR_ELEMENTS[i][0]);
+  for (let i = 0; i < c.outSegs.length; i++) k += "|" + c.outSegs[i].text + c.outSegs[i].key;
+  return k;
+}
+function fastKeyString(c) {
+  return c.colon + "|" + c.secStr + "|" + c.timeStrSlow + "|" + settings.clockScale + "|" + settings.glow + "|" + RENDER_W + "x" + RENDER_H + "|" + colorHex("time") + "|" + colorHex("seconds");
+}
+/* Re-render each layer only when its pixels would change. The slow layer (the
+   heavy shadow-blur glyphs) rebuilds ~once a minute; the tiny fast layer rebuilds
+   each second. This keeps the per-second work small so it never drops a frame. */
+function updateClockCache() {
+  const c = clockStrings();
+  ensureClockCanvases();
+  const sk = slowKeyString(c);
+  if (sk !== clockSlowKey) {
+    clockSlowCtx.clearRect(0, 0, RENDER_W, RENDER_H);
+    const prev = CTX; CTX = clockSlowCtx; renderClockSlow(c); CTX = prev;
+    clockSlowKey = sk;
+  }
+  const fk = fastKeyString(c);
+  if (fk !== clockFastKey) {
+    clockFastCtx.clearRect(0, 0, RENDER_W, RENDER_H);
+    const prev = CTX; CTX = clockFastCtx; renderClockFast(c); CTX = prev;
+    clockFastKey = fk;
+  }
 }
 
 /* ----------------------------- burn-in drift ------------------------------ */
@@ -347,13 +608,20 @@ function loop(now) {
   while (engine.fish.fish.length > fishTarget) engine.fish.fish.pop();
 
   const bg = background.pixels, fg = foreground.pixels;
-  for (let i = 0; i < composite.length; i++) composite[i] = blendPackedOver(bg[i], fg[i]);
+  for (let i = 0; i < composite.length; i++) { const f = fg[i]; composite[i] = (f >>> 24) === 0 ? bg[i] : blendPackedOver(bg[i], f); }
+
+  maybeStartReset(now);
+  const tankAlpha = aquariumOpacity(now);
+  updateClockCache();   // only re-renders the glyphs when the displayed values change
 
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, RENDER_W, RENDER_H);
   const [dx, dy] = driftOffset(now);
   ctx.save(); ctx.translate(dx, dy);
+  ctx.globalAlpha = tankAlpha;   // fade the tank only; clock stays at full opacity
   drawAquariumDots();
-  drawClock();
+  ctx.globalAlpha = 1;
+  ctx.drawImage(clockSlowCanvas, 0, 0);   // cheap blits of the cached clock layers
+  ctx.drawImage(clockFastCanvas, 0, 0);
   ctx.restore();
 
   foreground.clear();
@@ -367,8 +635,11 @@ function setTempUnitLabels() {
 }
 function populatePanel() {
   $("selUnit").value = settings.unit;
-  $("chkOutside").checked = settings.showOutside;
+  $("chkShowTemp").checked = settings.showTemp;
+  $("chkShowHum").checked = settings.showHumidity;
+  $("chkShowAqi").checked = settings.showAqi;
   $("inpClock").value = settings.clockScale; $("clockVal").textContent = settings.clockScale.toFixed(2) + "x";
+  $("chkGlow").checked = settings.glow;
   $("inpZip").value = settings.zip;
   $("inpCountry").value = settings.country;
   $("chkLive").checked = settings.useLive;
@@ -384,12 +655,80 @@ function populatePanel() {
   $("inpPlants").value = settings.plantCount; $("plantsVal").textContent = settings.plantCount;
   $("inpBoids").value = settings.boidsPerGroup; $("boidsVal").textContent = settings.boidsPerGroup;
   $("selLed").value = settings.ledSize;
+  $("selOrient").value = settings.orientation;
+  $("chkAutoReset").checked = settings.autoReset;
+  $("inpResetH").value = settings.resetH;
+  $("inpResetM").value = settings.resetM;
+  $("inpResetS").value = settings.resetS;
+  syncColorRows();
 }
+
+/* ---- clock color rows (color picker + hex + R/G/B, all kept in sync) ---- */
+function buildColorRows() {
+  const host = $("colorRows");
+  if (!host || host.childElementCount) return;   // build once
+  for (const [key, label] of COLOR_ELEMENTS) {
+    const row = document.createElement("div");
+    row.className = "row colorrow";
+    row.innerHTML =
+      '<label>' + label + '</label>' +
+      '<div class="colorctl">' +
+        '<input type="color" id="col_' + key + '">' +
+        '<input type="text" class="hexin" id="hex_' + key + '" maxlength="7" spellcheck="false">' +
+        '<input type="number" class="rgbin" id="r_' + key + '" min="0" max="255">' +
+        '<input type="number" class="rgbin" id="g_' + key + '" min="0" max="255">' +
+        '<input type="number" class="rgbin" id="b_' + key + '" min="0" max="255">' +
+        '<button type="button" class="cpbtn" id="copy_' + key + '">Copy</button>' +
+        '<button type="button" class="cpbtn" id="paste_' + key + '">Paste</button>' +
+      '</div>';
+    host.appendChild(row);
+    bindColorRow(key);
+  }
+}
+/* Single source of truth: normalize, store, sync all inputs, persist (live clock). */
+function setColor(key, hexStr) {
+  const c = hexToRgb(hexStr);
+  settings.colors[key] = rgbToHex(c.r, c.g, c.b);
+  syncColorRow(key);
+  saveSettings();
+}
+function bindColorRow(key) {
+  const col = $("col_" + key), hex = $("hex_" + key), rI = $("r_" + key), gI = $("g_" + key), bI = $("b_" + key);
+  col.addEventListener("input", () => setColor(key, col.value));   // fires live while dragging the picker
+  hex.addEventListener("change", () => {
+    let v = hex.value.trim(); if (v[0] !== "#") v = "#" + v;
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) setColor(key, v); else syncColorRow(key);  // revert bad input
+  });
+  const fromRgb = () => setColor(key, rgbToHex(parseInt(rI.value, 10) || 0, parseInt(gI.value, 10) || 0, parseInt(bI.value, 10) || 0));
+  rI.addEventListener("change", fromRgb);
+  gI.addEventListener("change", fromRgb);
+  bI.addEventListener("change", fromRgb);
+
+  const flash = (btn, msg) => { const prev = btn.dataset.label; btn.textContent = msg; setTimeout(() => { btn.textContent = prev; }, 900); };
+  const copyBtn = $("copy_" + key), pasteBtn = $("paste_" + key);
+  copyBtn.dataset.label = "Copy"; pasteBtn.dataset.label = "Paste";
+  copyBtn.addEventListener("click", () => clipboardCopy(colorHex(key)).then((ok) => flash(copyBtn, ok ? "Copied" : "Failed")));
+  pasteBtn.addEventListener("click", () => clipboardPaste().then((text) => {
+    const h = parseColor(text);
+    if (h) setColor(key, h); else flash(pasteBtn, "?");
+  }));
+}
+function syncColorRow(key) {
+  const c = hexToRgb(colorHex(key)), norm = rgbToHex(c.r, c.g, c.b);
+  const col = $("col_" + key), hex = $("hex_" + key), rI = $("r_" + key), gI = $("g_" + key), bI = $("b_" + key);
+  if (!col) return;
+  col.value = norm; hex.value = norm; rI.value = c.r; gI.value = c.g; bI.value = c.b;
+}
+function syncColorRows() { for (const [key] of COLOR_ELEMENTS) syncColorRow(key); }
 function bindPanel() {
+  buildColorRows();
   $("selUnit").addEventListener("change", (e) => { settings.unit = e.target.value; saveSettings(); populatePanel(); });
-  $("chkOutside").addEventListener("change", (e) => { settings.showOutside = e.target.checked; saveSettings(); });
+  $("chkShowTemp").addEventListener("change", (e) => { settings.showTemp = e.target.checked; saveSettings(); });
+  $("chkShowHum").addEventListener("change", (e) => { settings.showHumidity = e.target.checked; saveSettings(); });
+  $("chkShowAqi").addEventListener("change", (e) => { settings.showAqi = e.target.checked; saveSettings(); });
   $("inpClock").addEventListener("input", (e) => { settings.clockScale = parseFloat(e.target.value); $("clockVal").textContent = settings.clockScale.toFixed(2) + "x"; });
   $("inpClock").addEventListener("change", saveSettings);
+  $("chkGlow").addEventListener("change", (e) => { settings.glow = e.target.checked; saveSettings(); });  // clock cache auto-invalidates via key
 
   $("inpZip").addEventListener("change", (e) => { settings.zip = e.target.value.trim(); saveSettings(); fetchOutsideTemp(); });
   $("inpCountry").addEventListener("change", (e) => { settings.country = (e.target.value.trim() || "US"); saveSettings(); fetchOutsideTemp(); });
@@ -414,8 +753,15 @@ function bindPanel() {
   $("inpBoids").addEventListener("input", (e) => { $("boidsVal").textContent = e.target.value; });
   $("inpBoids").addEventListener("change", (e) => { settings.boidsPerGroup = parseInt(e.target.value, 10); saveSettings(); applyBoids(settings.boidsPerGroup); });
   $("selLed").addEventListener("change", (e) => { settings.ledSize = e.target.value; saveSettings(); buildScene(); });
+  $("selOrient").addEventListener("change", (e) => { settings.orientation = e.target.value; saveSettings(); buildScene(); });
 
-  $("btnReset").addEventListener("click", () => { settings = defaults(); saveSettings(); buildScene(); populatePanel(); fetchOutsideTemp(); });
+  $("chkAutoReset").addEventListener("change", (e) => { settings.autoReset = e.target.checked; saveSettings(); rescheduleReset(); });
+  const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, parseInt(v, 10) || 0));
+  $("inpResetH").addEventListener("change", (e) => { settings.resetH = clampInt(e.target.value, 0, 999); e.target.value = settings.resetH; saveSettings(); rescheduleReset(); });
+  $("inpResetM").addEventListener("change", (e) => { settings.resetM = clampInt(e.target.value, 0, 59); e.target.value = settings.resetM; saveSettings(); rescheduleReset(); });
+  $("inpResetS").addEventListener("change", (e) => { settings.resetS = clampInt(e.target.value, 0, 59); e.target.value = settings.resetS; saveSettings(); rescheduleReset(); });
+
+  $("btnReset").addEventListener("click", () => { settings = defaults(); saveSettings(); buildScene(); rescheduleReset(); populatePanel(); fetchOutsideTemp(); });
   $("btnClose").addEventListener("click", closePanel);
   $("settings").addEventListener("click", (e) => { if (e.target === $("settings")) closePanel(); });
   canvas.addEventListener("click", openPanel);
@@ -438,6 +784,9 @@ async function requestWakeLock() {
 /* --------------------------------- start ---------------------------------- */
 buildScene();
 bindPanel();
+// Re-fit the canvas when the OS rotates/resizes the window so portrait corrects itself instantly.
+window.addEventListener("resize", applyDisplayOrientation);
+window.addEventListener("orientationchange", applyDisplayOrientation);
 requestWakeLock();
 requestAnimationFrame(loop);
 setTimeout(fetchOutsideTemp, 1200);                 // initial outside-temp pull

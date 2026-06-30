@@ -9,14 +9,23 @@ export const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 export const clampByte = (value) => Math.round(clamp(Number(value) || 0, 0, BYTE_MAX));
 
+// Hot path: called once per drawn pixel. Avoid allocating a normalized object
+// (see normalizeColor) by reading components inline. Output is identical.
 export const packColor = (color) => {
-  const normalized = normalizeColor(color);
-  return (
-    ((normalized.a & BYTE_MAX) << 24) |
-    ((normalized.r & BYTE_MAX) << 16) |
-    ((normalized.g & BYTE_MAX) << 8) |
-    (normalized.b & BYTE_MAX)
-  ) >>> 0;
+  if (typeof color === "number") return color >>> 0;
+  let r, g, b, a;
+  if (Array.isArray(color)) {
+    r = color[0]; g = color[1]; b = color[2];
+    a = color.length > 3 ? color[3] : OPAQUE_ALPHA;
+  } else if (color && typeof color === "object") {
+    r = color.r ?? color.red ?? 0;
+    g = color.g ?? color.green ?? 0;
+    b = color.b ?? color.blue ?? 0;
+    a = color.a === undefined && color.alpha === undefined ? OPAQUE_ALPHA : (color.a ?? color.alpha);
+  } else {
+    r = 0; g = 0; b = 0; a = OPAQUE_ALPHA;
+  }
+  return ((clampByte(a) << 24) | (clampByte(r) << 16) | (clampByte(g) << 8) | clampByte(b)) >>> 0;
 };
 
 export const unpackColor = (packed) => ({
@@ -52,6 +61,8 @@ export function normalizeColor(color) {
   return BLACK;
 }
 
+// Hot path: called once per non-transparent pixel during compositing. Pure
+// integer math, no object allocation. Output is identical to the object form.
 export const blendPackedOver = (background, foreground) => {
   const foregroundAlpha = (foreground >>> 24) & BYTE_MAX;
   if (foregroundAlpha === 0) return background >>> 0;
@@ -61,15 +72,13 @@ export const blendPackedOver = (background, foreground) => {
   const inverseAlpha = OPAQUE_ALPHA - foregroundAlpha;
   const outputAlpha = foregroundAlpha + Math.round((backgroundAlpha * inverseAlpha) / OPAQUE_ALPHA);
 
-  const foregroundColor = unpackColor(foreground);
-  const backgroundColor = unpackColor(background);
+  const fr = (foreground >>> 16) & BYTE_MAX, fg = (foreground >>> 8) & BYTE_MAX, fb = foreground & BYTE_MAX;
+  const br = (background >>> 16) & BYTE_MAX, bg = (background >>> 8) & BYTE_MAX, bb = background & BYTE_MAX;
+  const r = Math.round((fr * foregroundAlpha + br * inverseAlpha) / OPAQUE_ALPHA);
+  const g = Math.round((fg * foregroundAlpha + bg * inverseAlpha) / OPAQUE_ALPHA);
+  const b = Math.round((fb * foregroundAlpha + bb * inverseAlpha) / OPAQUE_ALPHA);
 
-  return packColor({
-    r: (foregroundColor.r * foregroundAlpha + backgroundColor.r * inverseAlpha) / OPAQUE_ALPHA,
-    g: (foregroundColor.g * foregroundAlpha + backgroundColor.g * inverseAlpha) / OPAQUE_ALPHA,
-    b: (foregroundColor.b * foregroundAlpha + backgroundColor.b * inverseAlpha) / OPAQUE_ALPHA,
-    a: outputAlpha,
-  });
+  return (((outputAlpha & BYTE_MAX) << 24) | ((r & BYTE_MAX) << 16) | ((g & BYTE_MAX) << 8) | (b & BYTE_MAX)) >>> 0;
 };
 
 const roundCoord = (value) => Math.round(value);
