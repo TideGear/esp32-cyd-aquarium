@@ -72,7 +72,18 @@ export class ColorPalette {
   }
 
   updateRGB() {
-    this.colors = this.colorsHSV.map((color) => hsvToRgbRainbowApprox(color));
+    if (!this.colors || this.colors.length !== this.colorsHSV.length) {
+      this.colors = Array.from({ length: this.colorsHSV.length }, () => ({ r: 0, g: 0, b: 0 }));
+    }
+
+    for (let index = 0; index < this.colorsHSV.length; index += 1) {
+      const rgb = hsvToRgbRainbowApprox(this.colorsHSV[index]);
+      const target = this.colors[index];
+      target.r = rgb.r;
+      target.g = rgb.g;
+      target.b = rgb.b;
+    }
+
     return this.colors;
   }
 
@@ -85,13 +96,18 @@ export class ColorPalette {
     const saturation = clampByte(COLOR_PALETTE.HEALTH_SATURATION_MULTIPLIER * health);
     const value = clampByte(COLOR_PALETTE.AGE_VALUE_MULTIPLIER * ageFactor);
 
-    this.colorsHSV = this.colorsHSV.map((color) => ({
-      ...color,
-      s: saturation,
-      v: value,
-    }));
+    let changed = false;
+    for (const color of this.colorsHSV) {
+      if (color.s !== saturation || color.v !== value) {
+        color.s = saturation;
+        color.v = value;
+        changed = true;
+      }
+    }
 
-    this.updateRGB();
+    if (changed) {
+      this.updateRGB();
+    }
     return this.colors;
   }
 

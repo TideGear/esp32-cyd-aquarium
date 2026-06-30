@@ -145,7 +145,9 @@ export class Vector2 {
 
   dist(value) {
     const vector = asVector(value);
-    return new Vector2(vector.x - this.x, vector.y - this.y).length();
+    const dx = vector.x - this.x;
+    const dy = vector.y - this.y;
+    return Math.sqrt(dx * dx + dy * dy);
   }
 
   length() {

@@ -71,7 +71,7 @@ export class AquariumPlant {
       .addSelf(startVec);
   }
 
-  update({ framebuffer, humidityPercent = ENVIRONMENT.NORMAL_HUMIDITY_PERCENT, now = 0 } = {}) {
+  update({ framebuffer, humidityPercent = ENVIRONMENT.NORMAL_HUMIDITY_PERCENT, now = 0, debug = true } = {}) {
     if (!framebuffer?.foreground) {
       throw new Error("AquariumPlant.update requires a framebuffer with a foreground layer");
     }
@@ -170,7 +170,7 @@ export class AquariumPlants {
     return this;
   }
 
-  update({ framebuffer, humidityPercent = ENVIRONMENT.NORMAL_HUMIDITY_PERCENT, now = 0 } = {}) {
+  update({ framebuffer, humidityPercent = ENVIRONMENT.NORMAL_HUMIDITY_PERCENT, now = 0, debug = true } = {}) {
     if (!framebuffer) {
       throw new Error("AquariumPlants.update requires a framebuffer");
     }
@@ -182,7 +182,7 @@ export class AquariumPlants {
       plant.update({ framebuffer, humidityPercent, now });
     }
 
-    return this.getDebugSnapshot();
+    return debug ? this.getDebugSnapshot() : null;
   }
 
   getDebugSnapshot() {

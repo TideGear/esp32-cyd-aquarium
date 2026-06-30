@@ -52,7 +52,7 @@ export class BoidManager {
     }
   }
 
-  updateBoids(co2 = ENVIRONMENT.NORMAL_CO2_PPM) {
+  updateBoids(co2 = ENVIRONMENT.NORMAL_CO2_PPM, { debug = true } = {}) {
     this.lastCO2 = co2;
     this.lastSpeedMultiplier = clamp(
       mapValue(co2, CO2_THRESHOLDS.CO2_BAD, CO2_THRESHOLDS.CO2_REALBAD, 100.0, 0.0),
@@ -67,7 +67,7 @@ export class BoidManager {
       }
     }
 
-    return this.getDebugSnapshot();
+    return debug ? this.getDebugSnapshot() : null;
   }
 
   renderBoids(framebuffer) {
@@ -85,8 +85,8 @@ export class BoidManager {
     }
   }
 
-  update({ framebuffer, co2 = ENVIRONMENT.NORMAL_CO2_PPM } = {}) {
-    const snapshot = this.updateBoids(co2);
+  update({ framebuffer, co2 = ENVIRONMENT.NORMAL_CO2_PPM, debug = true } = {}) {
+    const snapshot = this.updateBoids(co2, { debug });
     this.renderBoids(framebuffer);
     return snapshot;
   }
